@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -15,10 +16,9 @@ func main() {
 	withCors := flag.Bool("cors", false, "enable cors header \"Access-Control-Allow-Origin\":*")
 	throttleRPS := flag.Int("throttle", 0, "throttle to n requests per second")
 	input, listen, err := parseArgs()
-	check(err, "parseArgs")
+	check(err, "")
 	target, err := url.ParseRequestURI(input)
 	check(err, "Url parse '"+input+"'")
-	check(nil, fmt.Sprintf("Proxiing %s through %s", target, listen))
 	var handler http.Handler
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.ErrorLog = log.New(os.Stdin, "[ERROR PROXY] ", log.LstdFlags)
@@ -26,19 +26,21 @@ func main() {
 	if *throttleRPS > 0 {
 		handler = throttle(*throttleRPS, handler)
 	}
-	handler = forgeHost(target.Host, handler)
+	handler = forgeHost(target, handler)
 	if *withCors {
 		handler = enableCors(handler)
 	}
+	log.Printf("Proxy started at http://%s\n", listen)
 	check(http.ListenAndServe(listen, handler), "http.ListenAndServe")
 }
 
 func check(err error, step string) {
 	defer log.SetPrefix("")
-	if err == nil {
+	if err != nil {
+		log.Fatalf("[ERROR] %s: %s", step, err)
+	}
+	if step != "" {
 		log.Printf("%s\n", step)
-	} else {
-		log.Fatalf("[OK] %s: %s", step, err)
 	}
 }
 
@@ -52,7 +54,7 @@ func parseArgs() (string, string, error) {
 	return args[0], args[1], nil
 }
 
-func enableCors(handler http.Handler) http.HandlerFunc {
+func enableCors(handler http.Handler) http.Handler {
 	log.Println("Cors headers enabled")
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		resp.Header().Set("Access-Control-Allow-Origin", "*")
@@ -60,7 +62,11 @@ func enableCors(handler http.Handler) http.HandlerFunc {
 	})
 }
 
-func forgeHost(hostname string, handler http.Handler) http.HandlerFunc {
+func forgeHost(target *url.URL, handler http.Handler) http.Handler {
+	hostname := target.Hostname()
+	if net.ParseIP(hostname) != nil {
+		return handler
+	}
 	log.Println("Forge request host with", hostname)
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		req.Host = hostname
@@ -70,7 +76,7 @@ func forgeHost(hostname string, handler http.Handler) http.HandlerFunc {
 	})
 }
 
-func throttle(reqPerSec int, handler http.Handler) http.HandlerFunc {
+func throttle(reqPerSec int, handler http.Handler) http.Handler {
 	ticker := time.NewTicker(time.Second / time.Duration(reqPerSec))
 	log.Printf("Throttle %d req per sec", reqPerSec)
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
